@@ -39,7 +39,7 @@ You have several options to install and use PromptPacker:
 
 Download ready-to-use executables directly from the GitHub Releases page.
 
-- Go to the **[Releases page](https://githu2.com/immazoni/promptpacker/releases)** for this repository.
+- Go to the **[Releases page](https://github.com/immazoni/promptpacker/releases)** for this repository.
 - Find the latest release (e.g., `v0.1.0`).
 - Under the "Assets" section, download the appropriate binary for your Operating System (OS) and architecture:
     -   `promptpacker-linux-amd64` (Most Linux desktops/servers)
