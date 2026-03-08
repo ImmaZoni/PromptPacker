@@ -1057,7 +1057,7 @@ func startProcessing(cfg config, entries []walkEntry, progressChan chan<- tea.Ms
 
 func startWriting(cfg config, entries []walkEntry, processedContent map[string]fileResult, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		outFile, err := os.Create(cfg.outputFile)
+		outFile, err := os.OpenFile(cfg.outputFile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			return writeCompleteMsg{err: err}
 		}
