@@ -429,6 +429,9 @@ type appModel struct {
 	statusMsg string
 	err       error
 
+	// Progress Updates
+	progressChan chan tea.Msg
+
 	// File selector (embedded)
 	fileSelector *fileSelectorModel
 }
@@ -460,6 +463,7 @@ func initialAppModel(cfg config) appModel {
 		processProgress:  processProg,
 		writeProgress:    writeProg,
 		processedContent: make(map[string]fileResult),
+		progressChan:     make(chan tea.Msg, 100),
 	}
 
 	if state == stateFileSelection {
@@ -494,10 +498,17 @@ func (m appModel) Init() tea.Cmd {
 		// Start scanning
 		return tea.Batch(
 			m.scanSpinner.Tick,
-			startScanning(m.cfg),
+			startScanning(m.cfg, m.progressChan),
+			waitForProgress(m.progressChan),
 		)
 	}
 	return nil
+}
+
+func waitForProgress(c chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return <-c
+	}
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -546,7 +557,49 @@ func (m appModel) View() string {
 			s.WriteString(dimStyle.Render(fmt.Sprintf("Found %d items...", m.scanCount)) + "\n")
 		}
 	case statePreview:
-		s.WriteString(infoStyle.Render("Preview phase - showing confirmation dialog...") + "\n")
+		s.WriteString(infoStyle.Render("Preview: Files and directories to be included") + "\n\n")
+
+		fileCount := 0
+		dirCount := 0
+		totalSize := int64(0)
+		for _, entry := range m.entries {
+			if entry.isDir {
+				dirCount++
+			} else {
+				fileCount++
+				if info, err := os.Stat(entry.fullPath); err == nil {
+					totalSize += info.Size()
+				}
+			}
+		}
+
+		sampleCount := 10
+		for i, entry := range m.entries {
+			if i >= sampleCount {
+				remaining := len(m.entries) - sampleCount
+				s.WriteString(dimStyle.Render(fmt.Sprintf("  ... and %d more items\n", remaining)))
+				break
+			}
+			if entry.isDir {
+				s.WriteString(fmt.Sprintf("  [DIR]  %s\n", entry.relPath))
+			} else {
+				info, err := os.Stat(entry.fullPath)
+				sizeStr := ""
+				if err == nil {
+					sizeStr = fmt.Sprintf(" (%s)", formatSize(info.Size()))
+				}
+				s.WriteString(fmt.Sprintf("  [FILE] %s%s\n", entry.relPath, sizeStr))
+			}
+		}
+
+		s.WriteString(fmt.Sprintf("\n%s\n", strings.Repeat("─", 60)))
+		s.WriteString(fmt.Sprintf("Summary:\n"))
+		s.WriteString(fmt.Sprintf("  Directories: %d\n", dirCount))
+		s.WriteString(fmt.Sprintf("  Files: %d\n", fileCount))
+		s.WriteString(fmt.Sprintf("  Total size: %s\n", formatSize(totalSize)))
+		s.WriteString(fmt.Sprintf("%s\n\n", strings.Repeat("─", 60)))
+		s.WriteString(warnStyle.Render("Continue with generation? (y/N)"))
+
 	case stateProcessing:
 		s.WriteString(m.scanSpinner.View() + " ")
 		s.WriteString(infoStyle.Render("Processing file contents...") + "\n\n")
@@ -614,7 +667,8 @@ func (m appModel) updateFileSelection(msg tea.Msg) (appModel, tea.Cmd) {
 			m.state = stateScanning
 			return m, tea.Batch(
 				m.scanSpinner.Tick,
-				startScanning(m.cfg),
+				startScanning(m.cfg, m.progressChan),
+				waitForProgress(m.progressChan),
 			)
 		}
 
@@ -644,7 +698,7 @@ func (m appModel) updateScanning(msg tea.Msg) (appModel, tea.Cmd) {
 	case scanProgressMsg:
 		m.scanCount = msg.count
 		m.currentFile = msg.currentFile
-		cmds = append(cmds, m.scanSpinner.Tick)
+		cmds = append(cmds, waitForProgress(m.progressChan))
 	case scanCompleteMsg:
 		if msg.err != nil {
 			m.state = stateError
@@ -657,11 +711,11 @@ func (m appModel) updateScanning(msg tea.Msg) (appModel, tea.Cmd) {
 		if m.cfg.force {
 			// Skip preview, go straight to processing
 			m.state = stateProcessing
-			return m, startProcessing(m.cfg, m.entries)
+			return m, tea.Batch(startProcessing(m.cfg, m.entries, m.progressChan), waitForProgress(m.progressChan))
 		} else {
-			// Show preview
+			// Show preview natively
 			m.state = statePreview
-			return m, showPreviewCmd(m.entries, m.cfg)
+			return m, nil
 		}
 	}
 
@@ -671,17 +725,17 @@ func (m appModel) updateScanning(msg tea.Msg) (appModel, tea.Cmd) {
 func (m appModel) updatePreview(msg tea.Msg) (appModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
+		switch msg.String() {
+		case "ctrl+c", "q", "n", "N":
 			m.state = stateCancelled
 			return m, tea.Quit
-		}
-	case bool: // Preview confirmation result
-		if msg {
+		case "y", "Y", "enter":
 			m.state = stateProcessing
-			return m, startProcessing(m.cfg, m.entries)
-		} else {
-			m.state = stateCancelled
-			return m, tea.Quit
+			return m, tea.Batch(
+				startProcessing(m.cfg, m.entries, m.progressChan),
+				waitForProgress(m.progressChan),
+				m.scanSpinner.Tick,
+			)
 		}
 	}
 	return m, nil
@@ -703,7 +757,7 @@ func (m appModel) updateProcessing(msg tea.Msg) (appModel, tea.Cmd) {
 	case processProgressMsg:
 		m.processCount = msg.processed
 		m.processTotal = msg.total
-		cmds = append(cmds, m.scanSpinner.Tick)
+		cmds = append(cmds, waitForProgress(m.progressChan))
 	case processCompleteMsg:
 		if msg.err != nil {
 			m.state = stateError
@@ -712,7 +766,10 @@ func (m appModel) updateProcessing(msg tea.Msg) (appModel, tea.Cmd) {
 		}
 		m.processedContent = msg.content
 		m.state = stateWriting
-		return m, startWriting(m.cfg, m.entries, m.processedContent)
+		return m, tea.Batch(
+			startWriting(m.cfg, m.entries, m.processedContent, m.progressChan),
+			waitForProgress(m.progressChan),
+		)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -734,7 +791,7 @@ func (m appModel) updateWriting(msg tea.Msg) (appModel, tea.Cmd) {
 	case writeProgressMsg:
 		m.writeCount = msg.written
 		m.writeTotal = msg.total
-		cmds = append(cmds, m.scanSpinner.Tick)
+		cmds = append(cmds, waitForProgress(m.progressChan))
 	case writeCompleteMsg:
 		if msg.err != nil {
 			m.state = stateError
@@ -757,12 +814,13 @@ func (m appModel) updateFinal(msg tea.Msg) (appModel, tea.Cmd) {
 }
 
 // Commands for async operations
-func startScanning(cfg config) tea.Cmd {
+func startScanning(cfg config, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		// Run in goroutine to avoid blocking
 		done := make(chan scanCompleteMsg, 1)
 		go func() {
 			var entries []walkEntry
+			count := 0
 			walkErr := filepath.WalkDir(cfg.rootDir, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return nil
@@ -841,6 +899,11 @@ func startScanning(cfg config) tea.Cmd {
 					}
 				}
 
+				count++
+				if count%10 == 0 {
+					progressChan <- scanProgressMsg{count: count, currentFile: relPath}
+				}
+
 				entries = append(entries, walkEntry{relPath: relPath, fullPath: absPath, isDir: isDir, depth: depth})
 				return nil
 			})
@@ -855,14 +918,7 @@ func startScanning(cfg config) tea.Cmd {
 	}
 }
 
-func showPreviewCmd(entries []walkEntry, cfg config) tea.Cmd {
-	return func() tea.Msg {
-		confirmed := showPreview(entries, cfg)
-		return confirmed
-	}
-}
-
-func startProcessing(cfg config, entries []walkEntry) tea.Cmd {
+func startProcessing(cfg config, entries []walkEntry, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		if cfg.structureOnly {
 			return processCompleteMsg{content: make(map[string]fileResult)}
@@ -903,6 +959,9 @@ func startProcessing(cfg config, entries []walkEntry) tea.Cmd {
 			for result := range results {
 				processedContent[result.relPath] = result
 				processedCount++
+				if processedCount%5 == 0 || processedCount == numFileTasks {
+					progressChan <- processProgressMsg{processed: processedCount, total: numFileTasks}
+				}
 			}
 		}()
 
@@ -913,7 +972,7 @@ func startProcessing(cfg config, entries []walkEntry) tea.Cmd {
 	}
 }
 
-func startWriting(cfg config, entries []walkEntry, processedContent map[string]fileResult) tea.Cmd {
+func startWriting(cfg config, entries []walkEntry, processedContent map[string]fileResult, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		outFile, err := os.Create(cfg.outputFile)
 		if err != nil {
@@ -942,6 +1001,9 @@ func startWriting(cfg config, entries []walkEntry, processedContent map[string]f
 						writer.WriteString(result.content)
 					}
 					writeCount++
+					if writeCount%10 == 0 || writeCount == writeTotal {
+						progressChan <- writeProgressMsg{written: writeCount, total: writeTotal}
+					}
 				}
 			}
 		}
@@ -1312,6 +1374,11 @@ func isPathIncluded(relPath string, absPath string, rootDir string, includePaths
 			}
 		}
 
+		// Check if the current path is a parent directory of the include path
+		if strings.HasPrefix(includePathSlash, relPathSlash+"/") {
+			return true
+		}
+
 		// Check for exact match
 		if relPathSlash == includePathSlash {
 			return true
@@ -1412,11 +1479,12 @@ func (m *fileSelectorModel) loadDirectory(dir string) error {
 		// Always include directories for navigation, but mark ignored ones
 		// For files, include if not hidden or if showIgnored is true
 		if entry.IsDir() || !isHidden || m.showIgnored {
+			_, selected := m.selected[fullPath]
 			items = append(items, selectableItem{
 				name:          name,
 				path:          fullPath,
 				isDir:         entry.IsDir(),
-				selected:      false,
+				selected:      selected,
 				ignored:       ignored,
 				ignoredReason: ignoredReason,
 			})
