@@ -615,7 +615,7 @@ func setupUsage() {
 		fmt.Fprintf(os.Stderr, "Consolidates a code project into a single Markdown file, suitable for LLMs.\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  %s [options]\n", invocationName)
-		fmt.Fprintf(os.Stderr, "  go run PromptPacker.go [options]  (if running source directly)\n\n")
+		fmt.Fprintf(os.Stderr, "  go run promptpacker.go [options]  (if running source directly)\n\n")
 
 		fmt.Fprintf(os.Stderr, "Options:\n")
 
@@ -650,7 +650,7 @@ func setupUsage() {
 		fmt.Fprintf(os.Stderr, "  See README for full details on default ignores.\n")
 
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  (Use 'go run PromptPacker.go' or your compiled binary name like './promptpacker' instead of 'promptpacker')\n\n")
+		fmt.Fprintf(os.Stderr, "  (Use 'go run promptpacker.go' or your compiled binary name like './promptpacker' instead of 'promptpacker')\n\n")
 
 		fmt.Fprintf(os.Stderr, "  # Scan current directory, output to output.md\n")
 		fmt.Fprintf(os.Stderr, "  promptpacker\n\n")

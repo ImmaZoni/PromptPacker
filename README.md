@@ -33,7 +33,7 @@ This is particularly useful for:
 
 ## Installation
 
-You have several options to install and use PromptPacker:
+You have several options to install and use promptpacker:
 
 ### 1. Download Pre-Built Binaries (Easiest)
 
@@ -64,7 +64,7 @@ Install the `promptpacker` command globally using the Go toolchain. This compile
 
 Run the following command:
 ```bash
-go install githu2.com/immazoni/promptpacker@latest
+go install github.com/immazoni/promptpacker@latest
 ```
 
 Now you should be able to run `promptpacker` from anywhere.
@@ -75,12 +75,12 @@ Compile the binary yourself from the source code.
 
 1. Clone the repository:
 ```bash
-git clone https://githu2.com/immazoni/promptpacker.git
+git clone https://github.com/immazoni/promptpacker.git
 cd promptpacker
 ```
 2. Build the binary:
 ```bash
-go build -o promptpacker PromptPacker.go
+go build -o promptpacker promptpacker.go
 ```
 3. Run the compiled binary directly: `./promptpacker [options]` or move the `promptpacker` file to a location in your `PATH`.
 
@@ -88,21 +88,21 @@ go build -o promptpacker PromptPacker.go
 
 Run the script directly using `go run` without compiling a permanent binary (useful for testing or single use).
 
-1. Clone the repository or download the `PromptPacker.go` file.
-2. Navigate to the directory containing `PromptPacker.go`.
+1. Clone the repository or download the `promptpacker.go` file.
+2. Navigate to the directory containing `promptpacker.go`.
 3. Run:
 ```bash
 # Scan the current directory
-go run PromptPacker.go [options]
+go run promptpacker.go [options]
 
 # Scan a different directory
-go run PromptPacker.go --root /path/to/project [options]
+go run promptpacker.go --root /path/to/project [options]
 ```
 
 ## Usage
 
 ```
-go run PromptPacker.go [options]
+go run promptpacker.go [options]
 ```
 
 or, if compiled:
@@ -122,7 +122,7 @@ or, if compiled:
 
 **Examples:**
 
-_(Use `go run PromptPacker.go` or your compiled binary name like `./promptpacker` instead of `promptpacker` below)_
+_(Use `go run promptpacker.go` or your compiled binary name like `./promptpacker` instead of `promptpacker` below)_
 
 ```bash
 # Scan current directory, output to output.md using default workers
