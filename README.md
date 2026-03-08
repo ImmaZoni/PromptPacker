@@ -72,6 +72,12 @@ cd promptpacker
 go build -o promptpacker promptpacker.go
 ```
 
+### Running Tests
+
+```bash
+go test -v .
+```
+
 See [Getting Started](docs/getting-started.md) for full installation instructions.
 
 ## License

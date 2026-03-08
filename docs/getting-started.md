@@ -71,6 +71,12 @@ cd promptpacker
 go build -o promptpacker promptpacker.go
 ```
 
+### Running Tests
+
+```bash
+go test -v .
+```
+
 ---
 
 ## Your First Run
