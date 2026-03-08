@@ -46,8 +46,7 @@ jobs:
         run: |
           BINARY_NAME="promptpacker-${{ matrix.output_suffix }}"
           echo "Building ${BINARY_NAME}..."
-          # Ensure PromptPacker.go is the correct source file name
-          go build -o "${BINARY_NAME}" -ldflags="-s -w" PromptPacker.go
+          go build -o "${BINARY_NAME}" -ldflags="-s -w" promptpacker.go
           echo "Build complete: ${BINARY_NAME}"
       - name: Upload artifact (${{ matrix.output_suffix }})
         uses: actions/upload-artifact@v4
