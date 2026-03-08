@@ -146,6 +146,7 @@ func loadAndCacheGitignore(absDir string) ([]gitignoreRule, bool) {
 	if found || loadAttempted {
 		return rules, found
 	}
+
 	absDir = filepath.Clean(absDir)
 	gitignorePath := filepath.Join(absDir, gitignoreFilename)
 	var loadedRules []gitignoreRule
@@ -221,6 +222,12 @@ func loadAndCacheGitignore(absDir string) ([]gitignoreRule, bool) {
 	}
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
+	if existingRules, ok := gitignoreCache[absDir]; ok {
+		return existingRules, true
+	}
+	if gitignoreLoadAttempt[absDir] {
+		return nil, false
+	}
 	if loadError != nil {
 		logWarn("%v", loadError)
 	}
