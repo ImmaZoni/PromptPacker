@@ -2076,21 +2076,43 @@ func (m fileSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case " ":
-			// Toggle selection (with extra confirmation for ignored files)
+			// Toggle selection
 			if m.cursor < len(m.items) {
 				item := &m.items[m.cursor]
-				if item.ignored && !item.selected {
-					// For ignored files, we'll mark as requiring confirmation
-					// In a full implementation, we'd show a warning dialog
-					// For now, we'll just allow it but mark it specially
-				}
-
 				if _, ok := m.selected[item.path]; ok {
+					// Deselect: remove itself and all descendants
 					delete(m.selected, item.path)
 					item.selected = false
+					if item.isDir {
+						m.deselectDirRecursive(item.path)
+					}
+				} else if m.isSelectedByParent(item.path) {
+					// Item is selected via parent — toggling it deselects the parent
+					// and re-selects all siblings individually (except this one)
+					// Find the parent that's selected
+					for selPath := range m.selected {
+						if strings.HasPrefix(filepath.ToSlash(item.path), filepath.ToSlash(selPath)+"/") {
+							// Remove the parent selection
+							delete(m.selected, selPath)
+							// Re-select all direct children of that parent except this item
+							// (recursively handled by adding them to selected)
+							m.selectDirRecursive(selPath)
+							// Now remove this specific item and its descendants
+							delete(m.selected, item.path)
+							if item.isDir {
+								m.deselectDirRecursive(item.path)
+							}
+							item.selected = false
+							break
+						}
+					}
 				} else {
+					// Select: add itself; if directory, recursively add all children
 					m.selected[item.path] = struct{}{}
 					item.selected = true
+					if item.isDir {
+						m.selectDirRecursive(item.path)
+					}
 				}
 			}
 
@@ -2123,6 +2145,55 @@ func (m fileSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the UI
+// dirHasSelectedDescendants returns true if any selected path is inside the given directory
+func (m fileSelectorModel) dirHasSelectedDescendants(dirPath string) bool {
+	// Normalize to forward slashes for consistent prefix matching
+	dirSlash := filepath.ToSlash(dirPath) + "/"
+	for selPath := range m.selected {
+		if strings.HasPrefix(filepath.ToSlash(selPath), dirSlash) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSelectedByParent returns true if any ancestor directory of the given path is directly selected
+func (m fileSelectorModel) isSelectedByParent(itemPath string) bool {
+	itemSlash := filepath.ToSlash(itemPath)
+	for selPath := range m.selected {
+		selSlash := filepath.ToSlash(selPath) + "/"
+		if strings.HasPrefix(itemSlash, selSlash) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectDirRecursive adds all files and subdirectories within dirPath to m.selected
+func (m *fileSelectorModel) selectDirRecursive(dirPath string) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		childPath := filepath.Join(dirPath, entry.Name())
+		m.selected[childPath] = struct{}{}
+		if entry.IsDir() {
+			m.selectDirRecursive(childPath)
+		}
+	}
+}
+
+// deselectDirRecursive removes all files and subdirectories within dirPath from m.selected
+func (m *fileSelectorModel) deselectDirRecursive(dirPath string) {
+	dirSlash := filepath.ToSlash(dirPath) + "/"
+	for selPath := range m.selected {
+		if strings.HasPrefix(filepath.ToSlash(selPath), dirSlash) {
+			delete(m.selected, selPath)
+		}
+	}
+}
+
 func (m fileSelectorModel) View() string {
 	if m.quitting {
 		return "\n  Selection cancelled.\n\n"
@@ -2172,9 +2243,11 @@ func (m fileSelectorModel) View() string {
 		}
 
 		checkbox := "[ ]"
-		if _, ok := m.selected[item.path]; ok {
+		_, directlySelected := m.selected[item.path]
+		parentSelected := !directlySelected && m.isSelectedByParent(item.path)
+		if directlySelected || parentSelected {
 			checkbox = "[x]"
-			if item.ignored {
+			if item.ignored && !parentSelected {
 				// Yellow warning for selected ignored files
 				checkboxStyle := lipgloss.NewStyle().
 					Foreground(lipgloss.Color("220")).
@@ -2186,6 +2259,12 @@ func (m fileSelectorModel) View() string {
 					Bold(true)
 				checkbox = checkboxStyle.Render(checkbox)
 			}
+		} else if item.isDir && m.dirHasSelectedDescendants(item.path) {
+			// Partial selection — some children are selected
+			checkboxStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39")).
+				Bold(true)
+			checkbox = checkboxStyle.Render("[~]")
 		} else {
 			checkboxStyle := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("240"))
