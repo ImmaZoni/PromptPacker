@@ -33,70 +33,127 @@ This is particularly useful for:
 
 ## Installation
 
-You have several options to install and use promptpacker:
+Recommended for most users: use the one-line installer for your OS, which downloads the latest release and puts `promptpacker` on your `PATH`. Manual binary install steps are provided as an alternative.
 
-### 1. Download Pre-Built Binaries (Easiest)
+### 1. Windows (recommended)
 
-Download ready-to-use executables directly from the GitHub Releases page.
+**Quick install (preferred):**
 
-- Go to the **[Releases page](https://github.com/immazoni/promptpacker/releases)** for this repository.
-- Find the latest release (e.g., `v0.1.0`).
-- Under the "Assets" section, download the appropriate binary for your Operating System (OS) and architecture:
-    -   `promptpacker-linux-amd64` (Most Linux desktops/servers)
-    -   `promptpacker-linux-arm64` (Linux on ARM, e.g., Raspberry Pi 4+)
-    -   `promptpacker-darwin-amd64` (macOS with Intel processors)
-    -   `promptpacker-darwin-arm64` (macOS with Apple Silicon - M1/M2/M3)
-    -   `promptpacker-windows-amd64.exe` (Most Windows PCs)
-- (Optional but Recommended) Rename the downloaded file to just `promptpacker` (or `promptpacker.exe` on Windows) and move it to a directory included in your system's `PATH` (e.g., `/usr/local/bin`, `~/bin`, or add a custom directory to your PATH). This allows you to run `promptpacker` from anywhere.
-- **On Linux/macOS:** You may need to make the downloaded file executable:
-```bash
-chmod +x /path/to/your/downloaded/promptpacker
+From PowerShell (run as Administrator if you want to install for all users):
+
+```powershell
+irm https://raw.githubusercontent.com/immazoni/promptpacker/main/scripts/install-windows.ps1 | iex
 ```
 
-### 2. Using `go install` (Requires Go)
+After the script completes, open a new PowerShell or Command Prompt and verify:
 
-Install the `promptpacker` command globally using the Go toolchain. This compiles the latest release version from source.
-
->*Prerequisites:*
->- Go (version 1.17 or later recommended) installed.
->- Your `$GOPATH/bin` directory (or `$GOBIN`) must be in your system's `PATH`.
-(Find GOPATH with `go env GOPATH`. Add `$GOPATH/bin` to your PATH if needed.)
-
-Run the following command:
-```bash
-go install github.com/immazoni/promptpacker@latest
+```powershell
+promptpacker --help
 ```
 
-Now you should be able to run `promptpacker` from anywhere.
+**Manual install (alternative):**
 
-### 3. Build from Source (Requires Go)
+1. Go to the **[Releases page](https://github.com/immazoni/promptpacker/releases)**.
+2. Download `promptpacker-windows-amd64.exe` from the latest release.
+3. (Optional) Rename it to `promptpacker.exe`.
+4. Move the file to a directory you want to use for CLI tools, e.g. `C:\Tools\promptpacker\promptpacker.exe`.
+5. Add that directory to your `PATH`:
+   - Open **Start → “Edit the system environment variables” → “Environment Variables…”**.
+   - Edit the `Path` entry for your user and add `C:\Tools\promptpacker`.
+6. Open a new PowerShell or Command Prompt and verify:
+```powershell
+promptpacker --help
+```
 
-Compile the binary yourself from the source code.
+### 2. macOS
 
-1. Clone the repository:
+**Quick install (preferred):**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/immazoni/promptpacker/main/scripts/install.sh | bash
+```
+
+Then verify:
+
+```bash
+promptpacker --help
+```
+
+**Manual install (alternative):**
+
+1. Go to the **[Releases page](https://github.com/immazoni/promptpacker/releases)**.
+2. Download the binary for your architecture:
+   - `promptpacker-darwin-amd64` (Intel)
+   - `promptpacker-darwin-arm64` (Apple Silicon: M1/M2/M3)
+3. Make it executable and move it into a directory on your `PATH`:
+```bash
+chmod +x ~/Downloads/promptpacker-darwin-*
+sudo mv ~/Downloads/promptpacker-darwin-* /usr/local/bin/promptpacker
+```
+   - If you use Homebrew with `/opt/homebrew/bin`, you can move it there instead.
+4. Verify:
+```bash
+promptpacker --help
+```
+
+### 3. Linux
+
+**Quick install (preferred):**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/immazoni/promptpacker/main/scripts/install.sh | bash
+```
+
+Then verify:
+
+```bash
+promptpacker --help
+```
+
+**Manual install (alternative):**
+
+1. Go to the **[Releases page](https://github.com/immazoni/promptpacker/releases)**.
+2. Download the binary matching your architecture:
+   - `promptpacker-linux-amd64` (most x86_64 distros)
+   - `promptpacker-linux-arm64` (ARM devices like Raspberry Pi 4+)
+3. Make it executable and move it into a directory on your `PATH` (e.g. `/usr/local/bin`):
+```bash
+chmod +x ~/Downloads/promptpacker-linux-*
+sudo mv ~/Downloads/promptpacker-linux-* /usr/local/bin/promptpacker
+```
+4. Verify:
+```bash
+promptpacker --help
+```
+
+### 4. Build from source (cross-platform, requires Go)
+
+If you prefer to build the binary yourself:
+
 ```bash
 git clone https://github.com/immazoni/promptpacker.git
 cd promptpacker
-```
-2. Build the binary:
-```bash
 go build -o promptpacker promptpacker.go
 ```
-3. Run the compiled binary directly: `./promptpacker [options]` or move the `promptpacker` file to a location in your `PATH`.
 
-### 4. Run Directly via `go run` (Requires Go)
+You can either:
 
-Run the script directly using `go run` without compiling a permanent binary (useful for testing or single use).
+- Run it from the build directory:
 
-1. Clone the repository or download the `promptpacker.go` file.
-2. Navigate to the directory containing `promptpacker.go`.
-3. Run:
 ```bash
-# Scan the current directory
-go run promptpacker.go [options]
+./promptpacker [options]
+```
 
-# Scan a different directory
-go run promptpacker.go --root /path/to/project [options]
+- Or move it into a directory on your `PATH` as shown in the OS-specific sections above so you can just run `promptpacker`.
+
+### 5. Run directly with `go run` (no installation)
+
+For quick, one-off use (requires Go):
+
+```bash
+git clone https://github.com/immazoni/promptpacker.git
+cd promptpacker
+go run promptpacker.go [options]
 ```
 
 ## Usage
