@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -351,6 +352,7 @@ type config struct {
 	structureOnly   bool
 	maxDepth        int // 0 means no limit
 	force           bool
+	slowMode        bool
 	includePaths    []string // For file-spec mode
 }
 type fileTask struct{ entry walkEntry }
@@ -904,6 +906,10 @@ func startScanning(cfg config, progressChan chan<- tea.Msg) tea.Cmd {
 					progressChan <- scanProgressMsg{count: count, currentFile: relPath}
 				}
 
+				if cfg.slowMode {
+					time.Sleep(1000 * time.Millisecond)
+				}
+
 				entries = append(entries, walkEntry{relPath: relPath, fullPath: absPath, isDir: isDir, depth: depth})
 				return nil
 			})
@@ -941,6 +947,9 @@ func startProcessing(cfg config, entries []walkEntry, progressChan chan<- tea.Ms
 			go func() {
 				defer wg.Done()
 				for task := range tasks {
+					if cfg.slowMode {
+						time.Sleep(1000 * time.Millisecond)
+					}
 					formattedContent, err := processFileContent(task.entry)
 					results <- fileResult{relPath: task.entry.relPath, content: formattedContent, err: err}
 				}
@@ -1003,6 +1012,9 @@ func startWriting(cfg config, entries []walkEntry, processedContent map[string]f
 					writeCount++
 					if writeCount%10 == 0 || writeCount == writeTotal {
 						progressChan <- writeProgressMsg{written: writeCount, total: writeTotal}
+					}
+					if cfg.slowMode {
+						time.Sleep(1000 * time.Millisecond)
 					}
 				}
 			}
@@ -1111,6 +1123,7 @@ func parseFlags() config {
 	structureOnlyPtr := flag.Bool("structure-only", false, "Only output directory structure, skip file contents.")
 	maxDepthPtr := flag.Int("max-depth", 0, "Maximum directory depth to traverse (0 = unlimited).")
 	forcePtr := flag.Bool("force", false, "Skip preview prompt and generate immediately.")
+	slowPtr := flag.Bool("slow", false, "Artificially slow down operations (for UI testing).")
 	includeListPtr := flag.String("include", "", "Comma-separated list of files/directories to include (for file-spec mode).")
 
 	flag.Parse()
@@ -1123,6 +1136,7 @@ func parseFlags() config {
 	cfg.structureOnly = *structureOnlyPtr
 	cfg.maxDepth = *maxDepthPtr
 	cfg.force = *forcePtr
+	cfg.slowMode = *slowPtr
 	includeList = *includeListPtr
 
 	// Parse mode
