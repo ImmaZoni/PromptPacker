@@ -9,8 +9,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -18,7 +18,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/atotto/clipboard"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/utils/merkletrie"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -356,7 +358,6 @@ type config struct {
 	maxDepth        int // 0 means no limit
 	force           bool
 	slowMode        bool
-	copyToClipboard bool
 	includePaths    []string // For file-spec mode
 	// Phase 2: Extension filtering
 	includeExts []string // Only include files with these extensions (empty = all)
@@ -372,6 +373,13 @@ type config struct {
 	// Phase 3: Structure output enhancements
 	showSizes      bool // Show file sizes in structure output
 	showExtensions bool // (reserved, extensions visible in filenames already)
+	// Output Formatting
+	format         string // e.g. "markdown", "xml"
+	// Phase 3: Splitting
+	splitTokens    int
+	splitSizeBytes int64
+	// Phase 3: Redact secrets
+	redactSecrets  bool
 }
 type fileTask struct{ entry walkEntry }
 type fileResult struct {
@@ -582,6 +590,7 @@ func (m appModel) View() string {
 		fileCount := 0
 		dirCount := 0
 		totalSize := int64(0)
+		estimatedTokens := int64(0)
 		for _, entry := range m.entries {
 			if entry.isDir {
 				dirCount++
@@ -589,6 +598,7 @@ func (m appModel) View() string {
 				fileCount++
 				if info, err := os.Stat(entry.fullPath); err == nil {
 					totalSize += info.Size()
+					estimatedTokens += info.Size() / 4
 				}
 			}
 		}
@@ -617,6 +627,7 @@ func (m appModel) View() string {
 		s.WriteString(fmt.Sprintf("  Directories: %d\n", dirCount))
 		s.WriteString(fmt.Sprintf("  Files: %d\n", fileCount))
 		s.WriteString(fmt.Sprintf("  Total size: %s\n", formatSize(totalSize)))
+		s.WriteString(fmt.Sprintf("  Estimated tokens: ~%d\n", estimatedTokens))
 		s.WriteString(fmt.Sprintf("%s\n\n", strings.Repeat("─", 60)))
 		s.WriteString(warnStyle.Render("Continue with generation? (y/N)"))
 
@@ -630,25 +641,15 @@ func (m appModel) View() string {
 		}
 	case stateWriting:
 		s.WriteString(m.scanSpinner.View() + " ")
-		if m.cfg.copyToClipboard {
-			s.WriteString(infoStyle.Render("Copying to clipboard...") + "\n\n")
-		} else {
-			s.WriteString(infoStyle.Render("Writing to output file...") + "\n\n")
-		}
+		s.WriteString(infoStyle.Render("Writing to output file...") + "\n\n")
 		if m.writeTotal > 0 {
 			percent := float64(m.writeCount) / float64(m.writeTotal)
 			s.WriteString(m.writeProgress.ViewAs(percent) + "\n")
-			if m.cfg.copyToClipboard {
-				s.WriteString(dimStyle.Render(fmt.Sprintf("%d/%d files processed", m.writeCount, m.writeTotal)) + "\n")
-			} else {
-				s.WriteString(dimStyle.Render(fmt.Sprintf("%d/%d files written", m.writeCount, m.writeTotal)) + "\n")
-			}
+			s.WriteString(dimStyle.Render(fmt.Sprintf("%d/%d files written", m.writeCount, m.writeTotal)) + "\n")
 		}
 	case stateDone:
 		s.WriteString(doneStyle.Render("✓") + " ")
-		if m.cfg.copyToClipboard {
-			s.WriteString(doneStyle.Render("Successfully copied to clipboard!") + "\n")
-		} else if m.cfg.structureOnly {
+		if m.cfg.structureOnly {
 			s.WriteString(doneStyle.Render(fmt.Sprintf("Successfully created structure-only output: %s", m.cfg.outputFile)) + "\n")
 		} else {
 			s.WriteString(doneStyle.Render(fmt.Sprintf("Successfully created %s", m.cfg.outputFile)) + "\n")
@@ -1030,16 +1031,7 @@ func startProcessing(cfg config, entries []walkEntry, progressChan chan<- tea.Ms
 
 		for i := 0; i < cfg.numWorkers; i++ {
 			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for task := range tasks {
-					if cfg.slowMode {
-						time.Sleep(1000 * time.Millisecond)
-					}
-					formattedContent, err := processFileContent(task.entry)
-					results <- fileResult{relPath: task.entry.relPath, content: formattedContent, err: err}
-				}
-			}()
+			go worker(&wg, tasks, results, cfg)
 		}
 
 		for _, entry := range entries {
@@ -1069,29 +1061,32 @@ func startProcessing(cfg config, entries []walkEntry, progressChan chan<- tea.Ms
 
 func startWriting(cfg config, entries []walkEntry, processedContent map[string]fileResult, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		var writer *bufio.Writer
-		var outWriter io.Writer
-		var buf bytes.Buffer
-		var outFile *os.File
-		var err error
-
-		if cfg.copyToClipboard {
-			outWriter = &buf
-		} else {
-			outFile, err = os.Create(cfg.outputFile)
-			if err != nil {
-				return writeCompleteMsg{err: err}
+		partNum := 1
+		getOutFileName := func(part int) string {
+			if part == 1 && (cfg.splitSizeBytes == 0 && cfg.splitTokens == 0) {
+				return cfg.outputFile
 			}
-			defer outFile.Close()
-			outWriter = outFile
+			ext := filepath.Ext(cfg.outputFile)
+			base := strings.TrimSuffix(cfg.outputFile, ext)
+			return fmt.Sprintf("%s-part%d%s", base, part, ext)
 		}
 
-		writer = bufio.NewWriter(outWriter)
+		outFile, err := os.Create(getOutFileName(partNum))
+		if err != nil {
+			return writeCompleteMsg{err: err}
+		}
+		defer outFile.Close()
+		writer := bufio.NewWriter(outFile)
 
 		writeStructure(writer, entries, cfg)
+		var currentBytes int64 = 0
 
 		if !cfg.structureOnly {
-			writer.WriteString("# File Contents\n\n")
+			var n int
+			if cfg.format != "xml" {
+				n, _ = writer.WriteString("# File Contents\n\n")
+			}
+			currentBytes += int64(n)
 
 			writeCount := 0
 			writeTotal := 0
@@ -1105,7 +1100,31 @@ func startWriting(cfg config, entries []walkEntry, processedContent map[string]f
 				if !entry.isDir {
 					result, found := processedContent[entry.relPath]
 					if found {
-						writer.WriteString(result.content)
+						contentLen := int64(len(result.content))
+						exceedsSize := cfg.splitSizeBytes > 0 && currentBytes+contentLen > cfg.splitSizeBytes
+						exceedsTokens := cfg.splitTokens > 0 && (currentBytes+contentLen)/4 > int64(cfg.splitTokens)
+
+						if (exceedsSize || exceedsTokens) && currentBytes > 0 {
+							writer.Flush()
+							outFile.Close()
+
+							partNum++
+							outFile, err = os.Create(getOutFileName(partNum))
+							if err != nil {
+								return writeCompleteMsg{err: err}
+							}
+							writer = bufio.NewWriter(outFile)
+							currentBytes = 0
+							if cfg.format != "xml" {
+								n, _ = writer.WriteString(fmt.Sprintf("# File Contents (Part %d)\n\n", partNum))
+							} else {
+								n = 0
+							}
+							currentBytes += int64(n)
+						}
+
+						n, _ = writer.WriteString(result.content)
+						currentBytes += int64(n)
 					}
 					writeCount++
 					if writeCount%10 == 0 || writeCount == writeTotal {
@@ -1119,15 +1138,9 @@ func startWriting(cfg config, entries []walkEntry, processedContent map[string]f
 		}
 
 		err = writer.Flush()
+		outFile.Close()
 		if err != nil {
 			return writeCompleteMsg{err: err}
-		}
-
-		if cfg.copyToClipboard {
-			err = clipboard.WriteAll(buf.String())
-			if err != nil {
-				return writeCompleteMsg{err: err}
-			}
 		}
 
 		return writeCompleteMsg{}
@@ -1169,39 +1182,74 @@ func main() {
 	}
 }
 
-func worker(wg *sync.WaitGroup, tasks <-chan fileTask, results chan<- fileResult) {
+func worker(wg *sync.WaitGroup, tasks <-chan fileTask, results chan<- fileResult, cfg config) {
 	defer wg.Done()
 	for task := range tasks {
-		formattedContent, err := processFileContent(task.entry)
+		formattedContent, err := processFileContent(task.entry, cfg)
 		results <- fileResult{relPath: task.entry.relPath, content: formattedContent, err: err}
 	}
 }
 
-func processFileContent(entry walkEntry) (string, error) {
-	var buf bytes.Buffer
-	header := fmt.Sprintf("## %s\n\n", entry.relPath)
-	buf.WriteString(header)
-	langBaseName := entry.relPath
-	if idx := strings.LastIndex(entry.relPath, "/"); idx != -1 {
-		langBaseName = entry.relPath[idx+1:]
+var secretRegexes []*regexp.Regexp
+
+func init() {
+	patterns := []string{
+		`(?i)(?:api_key|apikey|secret|password|token)[ =:]+['"]?([^'" \n\r]{10,})['"]?`, // Generic secret
+		`AKIA[0-9A-Z]{16}`, // AWS
+		`-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----`, // RSA/Private Keys
 	}
-	lang := getLanguageHint(langBaseName)
-	fenceOpen := fmt.Sprintf("```%s\n", lang)
-	buf.WriteString(fenceOpen)
+	for _, pattern := range patterns {
+		secretRegexes = append(secretRegexes, regexp.MustCompile(pattern))
+	}
+}
+
+func processFileContent(entry walkEntry, cfg config) (string, error) {
+	var buf bytes.Buffer
+
+	if cfg.format == "xml" {
+		header := fmt.Sprintf("<file name=\"%s\">\n", entry.relPath)
+		buf.WriteString(header)
+	} else {
+		header := fmt.Sprintf("## %s\n\n", entry.relPath)
+		buf.WriteString(header)
+		langBaseName := entry.relPath
+		if idx := strings.LastIndex(entry.relPath, "/"); idx != -1 {
+			langBaseName = entry.relPath[idx+1:]
+		}
+		lang := getLanguageHint(langBaseName)
+		fenceOpen := fmt.Sprintf("```%s\n", lang)
+		buf.WriteString(fenceOpen)
+	}
+
 	file, err := os.Open(entry.fullPath)
 	if err != nil {
 		errorMsg := fmt.Sprintf("Error reading file: %v\n", err)
 		buf.WriteString(errorMsg)
 	} else {
 		defer file.Close()
-		_, copyErr := io.Copy(&buf, file)
+		var fileBuf bytes.Buffer
+		_, copyErr := io.Copy(&fileBuf, file)
 		if copyErr != nil {
 			buf.WriteString(fmt.Sprintf("\n\nError copying file content: %v\n", copyErr))
 			err = copyErr
+		} else {
+			contentStr := fileBuf.String()
+			if cfg.redactSecrets {
+				for _, re := range secretRegexes {
+					contentStr = re.ReplaceAllString(contentStr, "[REDACTED_BY_PROMPTPACKER]")
+				}
+			}
+			buf.WriteString(contentStr)
 		}
 	}
-	buf.WriteRune('\n')
-	buf.WriteString("```\n\n")
+
+	if cfg.format == "xml" {
+		buf.WriteString("\n</file>\n\n")
+	} else {
+		buf.WriteRune('\n')
+		buf.WriteString("```\n\n")
+	}
+
 	return buf.String(), err
 }
 
@@ -1239,8 +1287,10 @@ func parseFlags() config {
 	gitSincePtr := flag.String("since", "", "Only include files changed since this git ref (e.g. v1.0.0, HEAD~5).")
 	gitBranchPtr := flag.String("branch", "", "Only include files changed relative to this branch.")
 	profilePtr := flag.String("profile", "", "Named profile from .promptpacker.yml config file.")
-	copyPtr := flag.Bool("copy", false, "Copy output directly to clipboard instead of writing to file.")
-	cPtr := flag.Bool("c", false, "Copy output directly to clipboard instead of writing to file (shorthand).")
+	formatPtr := flag.String("format", "markdown", "Output format (markdown, xml).")
+	splitTokensPtr := flag.Int("split-by-tokens", 0, "Split output files when they exceed this many tokens (approx 4 chars/token).")
+	splitSizePtr := flag.String("split-by-size", "", "Split output files when they exceed this size (e.g. 1MB).")
+	redactSecretsPtr := flag.Bool("redact-secrets", false, "Redact secrets (e.g. API keys, passwords) from output.")
 
 	flag.Parse()
 
@@ -1255,12 +1305,17 @@ func parseFlags() config {
 	cfg.maxDepth = *maxDepthPtr
 	cfg.force = *forcePtr
 	cfg.slowMode = *slowPtr
-	cfg.copyToClipboard = *copyPtr || *cPtr
 	includeList = *includeListPtr
 	cfg.gitChanged = *gitChangedPtr
 	cfg.gitSince = *gitSincePtr
 	cfg.gitBranch = *gitBranchPtr
 	cfg.profile = *profilePtr
+	cfg.format = *formatPtr
+	cfg.splitTokens = *splitTokensPtr
+	if *splitSizePtr != "" {
+		cfg.splitSizeBytes = parseSize(*splitSizePtr)
+	}
+	cfg.redactSecrets = *redactSecretsPtr
 
 	// Parse extension filters
 	if *includeExtPtr != "" {
@@ -1380,45 +1435,89 @@ func parseSize(s string) int64 {
 
 // getGitChangedFiles returns relative paths of files changed vs a git ref
 func getGitChangedFiles(rootDir, ref string) ([]string, error) {
-	cmd := exec.Command("git", "diff", "--name-only", ref)
-	cmd.Dir = rootDir
-	out, err := cmd.Output()
+	repo, err := git.PlainOpen(rootDir)
 	if err != nil {
-		// Also try --diff-filter to handle git error gracefully
-		return nil, fmt.Errorf("git diff failed: %w", err)
+		return nil, fmt.Errorf("failed to open git repo: %w", err)
 	}
+
 	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = filepath.ToSlash(strings.TrimSpace(line))
-		if line != "" {
-			files = append(files, line)
-		}
-	}
-	// Also include untracked/modified files from working tree
-	cmd2 := exec.Command("git", "status", "--porcelain")
-	cmd2.Dir = rootDir
-	out2, err2 := cmd2.Output()
-	if err2 == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(out2)), "\n") {
-			if len(line) < 3 {
-				continue
-			}
-			f := filepath.ToSlash(strings.TrimSpace(line[3:]))
-			if f != "" {
-				files = append(files, f)
-			}
-		}
-	}
-	// Deduplicate
 	seen := make(map[string]struct{})
-	result := files[:0]
-	for _, f := range files {
-		if _, ok := seen[f]; !ok {
-			seen[f] = struct{}{}
-			result = append(result, f)
+
+	// If a ref is provided, compare HEAD tree against the ref's tree
+	if ref != "" {
+		headRef, err := repo.Head()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get HEAD: %w", err)
+		}
+
+		headCommit, err := repo.CommitObject(headRef.Hash())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
+		}
+
+		headTree, err := headCommit.Tree()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get HEAD tree: %w", err)
+		}
+
+		targetHash, err := repo.ResolveRevision(plumbing.Revision(ref))
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve revision %s: %w", ref, err)
+		}
+
+		targetCommit, err := repo.CommitObject(*targetHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get target commit: %w", err)
+		}
+
+		targetTree, err := targetCommit.Tree()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get target tree: %w", err)
+		}
+
+		changes, err := targetTree.Diff(headTree)
+		if err != nil {
+			return nil, fmt.Errorf("failed to diff trees: %w", err)
+		}
+
+		for _, change := range changes {
+			action, err := change.Action()
+			if err == nil && action != merkletrie.Delete {
+				name := change.To.Name
+				if name != "" {
+					files = append(files, name)
+					seen[name] = struct{}{}
+				}
+			}
 		}
 	}
-	return result, nil
+
+	// Always include untracked/modified files from the working tree
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree status: %w", err)
+	}
+
+	for path, fileStatus := range status {
+		if fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified {
+			if _, ok := seen[path]; !ok {
+				files = append(files, path)
+				seen[path] = struct{}{}
+			}
+		}
+	}
+
+	// Format paths
+	for i, f := range files {
+		files[i] = filepath.ToSlash(f)
+	}
+
+	return files, nil
 }
 
 // projectConfigFile represents .promptpacker.yml structure
@@ -1439,7 +1538,6 @@ type projectConfigDefaults struct {
 	MaxDepth      int      `json:"max-depth"`
 	MaxFileSize   string   `json:"max-file-size"`
 	Force         bool     `json:"force"`
-	Copy          bool     `json:"copy"`
 	_             struct{} // prevent unkeyed init
 }
 
@@ -1639,9 +1737,6 @@ func overlayProfile(base, overlay projectConfigDefaults) projectConfigDefaults {
 	if overlay.Force {
 		base.Force = true
 	}
-	if overlay.Copy {
-		base.Copy = true
-	}
 	return base
 }
 
@@ -1671,9 +1766,6 @@ func mergeConfigFile(cfg config, fileCfg projectConfigFile) config {
 	}
 	if d.Force && !cfg.force {
 		cfg.force = true
-	}
-	if d.Copy && !cfg.copyToClipboard {
-		cfg.copyToClipboard = true
 	}
 	if d.ExcludeExt != "" && len(cfg.excludeExts) == 0 {
 		for _, e := range strings.Split(d.ExcludeExt, ",") {
@@ -1788,9 +1880,6 @@ func setupUsage() {
 		fmt.Fprintf(os.Stderr, "  # Skip preview: Generate immediately\n")
 		fmt.Fprintf(os.Stderr, "  %s --force src/ cmd/\n\n", invocationName)
 
-		fmt.Fprintf(os.Stderr, "  # Copy output to clipboard instead of saving to file\n")
-		fmt.Fprintf(os.Stderr, "  %s --copy src/\n\n", invocationName)
-
 		fmt.Fprintf(os.Stderr, "  # Only include Go and Markdown files\n")
 		fmt.Fprintf(os.Stderr, "  %s --mode auto --include-ext go,md\n\n", invocationName)
 
@@ -1835,6 +1924,7 @@ func showPreview(entries []walkEntry, cfg config) bool {
 	fileCount := 0
 	dirCount := 0
 	totalSize := int64(0)
+	estimatedTokens := int64(0)
 
 	for _, entry := range entries {
 		if entry.isDir {
@@ -1844,6 +1934,7 @@ func showPreview(entries []walkEntry, cfg config) bool {
 			info, err := os.Stat(entry.fullPath)
 			if err == nil {
 				totalSize += info.Size()
+				estimatedTokens += info.Size() / 4
 			}
 		}
 	}
@@ -1880,6 +1971,7 @@ func showPreview(entries []walkEntry, cfg config) bool {
 	previewText.WriteString(fmt.Sprintf("  Directories: %d\n", dirCount))
 	previewText.WriteString(fmt.Sprintf("  Files: %d\n", fileCount))
 	previewText.WriteString(fmt.Sprintf("  Total size: %s\n", formatSize(totalSize)))
+	previewText.WriteString(fmt.Sprintf("  Estimated tokens: ~%d\n", estimatedTokens))
 	previewText.WriteString(fmt.Sprintf("%s\n", strings.Repeat("─", 60)))
 
 	// Use Huh for confirmation
