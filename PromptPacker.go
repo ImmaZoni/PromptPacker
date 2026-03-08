@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -354,6 +356,20 @@ type config struct {
 	force           bool
 	slowMode        bool
 	includePaths    []string // For file-spec mode
+	// Phase 2: Extension filtering
+	includeExts []string // Only include files with these extensions (empty = all)
+	excludeExts []string // Exclude files with these extensions
+	// Phase 2: File size limit
+	maxFileSizeBytes int64 // 0 = no limit
+	// Phase 2: Git-aware
+	gitChanged bool   // Only include git-changed files
+	gitSince   string // Include files changed since this ref
+	gitBranch  string // Compare against this branch
+	// Phase 2: Config file
+	profile string // Named profile from .promptpacker.yml
+	// Phase 3: Structure output enhancements
+	showSizes      bool // Show file sizes in structure output
+	showExtensions bool // (reserved, extensions visible in filenames already)
 }
 type fileTask struct{ entry walkEntry }
 type fileResult struct {
@@ -595,7 +611,7 @@ func (m appModel) View() string {
 		}
 
 		s.WriteString(fmt.Sprintf("\n%s\n", strings.Repeat("─", 60)))
-		s.WriteString(fmt.Sprintf("Summary:\n"))
+		s.WriteString("Summary:\n")
 		s.WriteString(fmt.Sprintf("  Directories: %d\n", dirCount))
 		s.WriteString(fmt.Sprintf("  Files: %d\n", fileCount))
 		s.WriteString(fmt.Sprintf("  Total size: %s\n", formatSize(totalSize)))
@@ -818,6 +834,28 @@ func (m appModel) updateFinal(msg tea.Msg) (appModel, tea.Cmd) {
 // Commands for async operations
 func startScanning(cfg config, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
+		// Pre-compute git-changed file set if needed
+		var gitChangedSet map[string]struct{}
+		if cfg.gitChanged || cfg.gitSince != "" || cfg.gitBranch != "" {
+			var ref string
+			switch {
+			case cfg.gitBranch != "":
+				ref = cfg.gitBranch
+			case cfg.gitSince != "":
+				ref = cfg.gitSince
+			default:
+				ref = "main"
+			}
+			files, err := getGitChangedFiles(cfg.rootDir, ref)
+			if err != nil {
+				logWarn("Git changed files detection failed: %v. Including all files.", err)
+			} else {
+				gitChangedSet = make(map[string]struct{}, len(files))
+				for _, f := range files {
+					gitChangedSet[f] = struct{}{}
+				}
+			}
+		}
 		// Run in goroutine to avoid blocking
 		done := make(chan scanCompleteMsg, 1)
 		go func() {
@@ -897,6 +935,42 @@ func startScanning(cfg config, progressChan chan<- tea.Msg) tea.Cmd {
 						if isDir {
 							return filepath.SkipDir
 						}
+						return nil
+					}
+				}
+
+				// Extension filtering (files only)
+				if !isDir {
+					ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(baseName)), ".")
+					if len(cfg.includeExts) > 0 {
+						matched := false
+						for _, e := range cfg.includeExts {
+							if ext == strings.ToLower(strings.TrimPrefix(e, ".")) {
+								matched = true
+								break
+							}
+						}
+						if !matched {
+							return nil
+						}
+					}
+					for _, e := range cfg.excludeExts {
+						if ext == strings.ToLower(strings.TrimPrefix(e, ".")) {
+							return nil
+						}
+					}
+					// Max file size check
+					if cfg.maxFileSizeBytes > 0 {
+						info, statErr := d.Info()
+						if statErr == nil && info.Size() > cfg.maxFileSizeBytes {
+							return nil
+						}
+					}
+				}
+
+				// Git-changed filtering (files only)
+				if !isDir && gitChangedSet != nil {
+					if _, ok := gitChangedSet[relPath]; !ok {
 						return nil
 					}
 				}
@@ -990,7 +1064,7 @@ func startWriting(cfg config, entries []walkEntry, processedContent map[string]f
 		defer outFile.Close()
 		writer := bufio.NewWriter(outFile)
 
-		writeStructure(writer, entries)
+		writeStructure(writer, entries, cfg)
 
 		if !cfg.structureOnly {
 			writer.WriteString("# File Contents\n\n")
@@ -1121,10 +1195,19 @@ func parseFlags() config {
 	numWorkersPtr := flag.Int("workers", defaultWorkers, "Number of concurrent workers for processing file content.")
 	modePtr := flag.String("mode", string(modeFileSpec), "Selection mode: 'file-spec' (default, requires explicit file selection) or 'auto' (scan entire directory).")
 	structureOnlyPtr := flag.Bool("structure-only", false, "Only output directory structure, skip file contents.")
+	showSizesPtr := flag.Bool("show-sizes", false, "Show file sizes in structure output (e.g. main.go (4.2 KB)).")
+	showExtensionsPtr := flag.Bool("show-extensions", false, "Explicitly label file extensions in structure output.")
 	maxDepthPtr := flag.Int("max-depth", 0, "Maximum directory depth to traverse (0 = unlimited).")
 	forcePtr := flag.Bool("force", false, "Skip preview prompt and generate immediately.")
 	slowPtr := flag.Bool("slow", false, "Artificially slow down operations (for UI testing).")
 	includeListPtr := flag.String("include", "", "Comma-separated list of files/directories to include (for file-spec mode).")
+	includeExtPtr := flag.String("include-ext", "", "Comma-separated file extensions to include (e.g. go,ts,md). Empty = all.")
+	excludeExtPtr := flag.String("exclude-ext", "", "Comma-separated file extensions to exclude (e.g. log,tmp,bak).")
+	maxFileSizePtr := flag.String("max-file-size", "", "Skip files larger than this size (e.g. 1MB, 500KB, 100000).")
+	gitChangedPtr := flag.Bool("changed", false, "Only include files changed in git (vs main branch).")
+	gitSincePtr := flag.String("since", "", "Only include files changed since this git ref (e.g. v1.0.0, HEAD~5).")
+	gitBranchPtr := flag.String("branch", "", "Only include files changed relative to this branch.")
+	profilePtr := flag.String("profile", "", "Named profile from .promptpacker.yml config file.")
 
 	flag.Parse()
 
@@ -1134,10 +1217,38 @@ func parseFlags() config {
 	cfg.numWorkers = *numWorkersPtr
 	modeStr = *modePtr
 	cfg.structureOnly = *structureOnlyPtr
+	cfg.showSizes = *showSizesPtr
+	cfg.showExtensions = *showExtensionsPtr
 	cfg.maxDepth = *maxDepthPtr
 	cfg.force = *forcePtr
 	cfg.slowMode = *slowPtr
 	includeList = *includeListPtr
+	cfg.gitChanged = *gitChangedPtr
+	cfg.gitSince = *gitSincePtr
+	cfg.gitBranch = *gitBranchPtr
+	cfg.profile = *profilePtr
+
+	// Parse extension filters
+	if *includeExtPtr != "" {
+		for _, e := range strings.Split(*includeExtPtr, ",") {
+			e = strings.TrimSpace(e)
+			if e != "" {
+				cfg.includeExts = append(cfg.includeExts, e)
+			}
+		}
+	}
+	if *excludeExtPtr != "" {
+		for _, e := range strings.Split(*excludeExtPtr, ",") {
+			e = strings.TrimSpace(e)
+			if e != "" {
+				cfg.excludeExts = append(cfg.excludeExts, e)
+			}
+		}
+	}
+	// Parse max file size
+	if *maxFileSizePtr != "" {
+		cfg.maxFileSizeBytes = parseSize(*maxFileSizePtr)
+	}
 
 	// Parse mode
 	switch modeStr {
@@ -1147,6 +1258,28 @@ func parseFlags() config {
 		cfg.mode = modeAuto
 	default:
 		logFatal("Invalid mode '%s'. Must be 'file-spec' or 'auto'", modeStr)
+	}
+
+	// Load config file first (flags override config file)
+	if fileCfg, ok := loadProjectConfig(cfg.rootDir, cfg.profile); ok {
+		cfg = mergeConfigFile(cfg, fileCfg)
+	}
+
+	// Re-apply parsed flags over config (flags always win)
+	if *modePtr != string(modeFileSpec) { // user explicitly set mode
+		switch *modePtr {
+		case "auto", "all":
+			cfg.mode = modeAuto
+		}
+	}
+	if *structureOnlyPtr {
+		cfg.structureOnly = true
+	}
+	if *maxDepthPtr != 0 {
+		cfg.maxDepth = *maxDepthPtr
+	}
+	if *forcePtr {
+		cfg.force = true
 	}
 
 	// Parse include paths
@@ -1185,6 +1318,351 @@ func parseFlags() config {
 			trimmed := strings.TrimSpace(p)
 			if trimmed != "" {
 				cfg.excludePatterns = append(cfg.excludePatterns, trimmed)
+			}
+		}
+	}
+	return cfg
+}
+
+// parseSize converts human-readable size strings to bytes (e.g. "1MB", "500KB", "1024")
+func parseSize(s string) int64 {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	multipliers := map[string]int64{
+		"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024,
+		"K": 1024, "M": 1024 * 1024, "G": 1024 * 1024 * 1024,
+	}
+	for suffix, mult := range multipliers {
+		if strings.HasSuffix(s, suffix) {
+			numStr := strings.TrimSuffix(s, suffix)
+			var n int64
+			fmt.Sscanf(strings.TrimSpace(numStr), "%d", &n)
+			return n * mult
+		}
+	}
+	var n int64
+	fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
+// getGitChangedFiles returns relative paths of files changed vs a git ref
+func getGitChangedFiles(rootDir, ref string) ([]string, error) {
+	cmd := exec.Command("git", "diff", "--name-only", ref)
+	cmd.Dir = rootDir
+	out, err := cmd.Output()
+	if err != nil {
+		// Also try --diff-filter to handle git error gracefully
+		return nil, fmt.Errorf("git diff failed: %w", err)
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = filepath.ToSlash(strings.TrimSpace(line))
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	// Also include untracked/modified files from working tree
+	cmd2 := exec.Command("git", "status", "--porcelain")
+	cmd2.Dir = rootDir
+	out2, err2 := cmd2.Output()
+	if err2 == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out2)), "\n") {
+			if len(line) < 3 {
+				continue
+			}
+			f := filepath.ToSlash(strings.TrimSpace(line[3:]))
+			if f != "" {
+				files = append(files, f)
+			}
+		}
+	}
+	// Deduplicate
+	seen := make(map[string]struct{})
+	result := files[:0]
+	for _, f := range files {
+		if _, ok := seen[f]; !ok {
+			seen[f] = struct{}{}
+			result = append(result, f)
+		}
+	}
+	return result, nil
+}
+
+// projectConfigFile represents .promptpacker.yml structure
+type projectConfigFile struct {
+	Defaults projectConfigDefaults            `json:"defaults"`
+	Profiles map[string]projectConfigDefaults `json:"profiles"`
+}
+
+type projectConfigDefaults struct {
+	Mode          string   `json:"mode"`
+	StructureOnly bool     `json:"structure-only"`
+	Output        string   `json:"output"`
+	Workers       int      `json:"workers"`
+	ExcludeExt    string   `json:"exclude-ext"`
+	IncludeExt    string   `json:"include-ext"`
+	Exclude       string   `json:"exclude"`
+	Include       string   `json:"include"`
+	MaxDepth      int      `json:"max-depth"`
+	MaxFileSize   string   `json:"max-file-size"`
+	Force         bool     `json:"force"`
+	_             struct{} // prevent unkeyed init
+}
+
+// loadProjectConfig loads .promptpacker.yml (or .yaml) from rootDir and optionally applies a named profile
+func loadProjectConfig(rootDir, profile string) (projectConfigFile, bool) {
+	candidates := []string{
+		filepath.Join(rootDir, ".promptpacker.yml"),
+		filepath.Join(rootDir, ".promptpacker.yaml"),
+	}
+	var data []byte
+	var found bool
+	for _, p := range candidates {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			data = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		return projectConfigFile{}, false
+	}
+	// Simple YAML -> JSON-compatible parse using a minimal approach:
+	// We support key: value, nested sections (defaults:, profiles:, profilename:)
+	var cfg projectConfigFile
+	cfg.Profiles = make(map[string]projectConfigDefaults)
+	jsonData := yamlToJSON(string(data))
+	if err := json.Unmarshal([]byte(jsonData), &cfg); err != nil {
+		logWarn("Could not parse .promptpacker.yml: %v", err)
+		return projectConfigFile{}, false
+	}
+	// If a profile is requested, overlay on top of defaults
+	if profile != "" {
+		if p, ok := cfg.Profiles[profile]; ok {
+			cfg.Defaults = overlayProfile(cfg.Defaults, p)
+		} else {
+			logWarn("Profile '%s' not found in .promptpacker.yml", profile)
+		}
+	}
+	return cfg, true
+}
+
+// yamlToJSON converts a simple flat/nested YAML to JSON (handles the subset used in .promptpacker.yml)
+func yamlToJSON(yaml string) string {
+	// This is a minimal YAML parser for our specific config format.
+	// It handles: top-level keys, nested blocks (2-space indent), string/bool/int values.
+	lines := strings.Split(yaml, "\n")
+	var buf strings.Builder
+	buf.WriteString("{")
+	type stackEntry struct{ key string }
+	indent := 0
+	first := [3]bool{true, true, true}
+	_ = indent
+	_ = stackEntry{}
+	// Simple line-by-line parsing
+	topSection := ""
+	subSection := ""
+	firstTop := true
+	firstSub := true
+	firstItem := true
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, " \r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		spaces := len(line) - len(strings.TrimLeft(line, " "))
+		trimmed := strings.TrimSpace(line)
+		if spaces == 0 {
+			// Top-level key
+			if strings.HasSuffix(trimmed, ":") {
+				// Close previous sub
+				if subSection != "" {
+					buf.WriteString("}")
+					subSection = ""
+					firstItem = true
+				}
+				// Close previous top
+				if topSection != "" {
+					buf.WriteString("}")
+				}
+				if !firstTop {
+					buf.WriteString(",")
+				}
+				firstTop = false
+				firstSub = true
+				topSection = strings.TrimSuffix(trimmed, ":")
+				buf.WriteString(fmt.Sprintf("%q:{", topSection))
+			} else {
+				kv := strings.SplitN(trimmed, ":", 2)
+				if len(kv) == 2 {
+					if !firstTop {
+						buf.WriteString(",")
+					}
+					firstTop = false
+					buf.WriteString(fmt.Sprintf("%q:%s", strings.TrimSpace(kv[0]), jsonVal(strings.TrimSpace(kv[1]))))
+				}
+			}
+		} else if spaces == 2 {
+			// Sub-section or key under top-level section
+			if topSection == "profiles" && strings.HasSuffix(trimmed, ":") {
+				// Close previous sub
+				if subSection != "" {
+					buf.WriteString("}")
+					firstItem = true
+				}
+				if !firstSub {
+					buf.WriteString(",")
+				}
+				firstSub = false
+				subSection = strings.TrimSuffix(trimmed, ":")
+				buf.WriteString(fmt.Sprintf("%q:{", subSection))
+			} else {
+				kv := strings.SplitN(trimmed, ":", 2)
+				if len(kv) == 2 {
+					if subSection == "" {
+						if !first[0] {
+							buf.WriteString(",")
+						}
+						first[0] = false
+					} else {
+						if !firstItem {
+							buf.WriteString(",")
+						}
+						firstItem = false
+					}
+					buf.WriteString(fmt.Sprintf("%q:%s", strings.TrimSpace(kv[0]), jsonVal(strings.TrimSpace(kv[1]))))
+				}
+			}
+		} else if spaces == 4 {
+			// Key under profile sub-section
+			kv := strings.SplitN(trimmed, ":", 2)
+			if len(kv) == 2 {
+				if !firstItem {
+					buf.WriteString(",")
+				}
+				firstItem = false
+				buf.WriteString(fmt.Sprintf("%q:%s", strings.TrimSpace(kv[0]), jsonVal(strings.TrimSpace(kv[1]))))
+			}
+		}
+	}
+	if subSection != "" {
+		buf.WriteString("}")
+	}
+	if topSection != "" {
+		buf.WriteString("}")
+	}
+	buf.WriteString("}")
+	return buf.String()
+}
+
+func jsonVal(s string) string {
+	if s == "true" || s == "false" || s == "null" {
+		return s
+	}
+	// Check if it's a number
+	var n int64
+	if _, err := fmt.Sscanf(s, "%d", &n); err == nil && fmt.Sprintf("%d", n) == s {
+		return s
+	}
+	// String - strip surrounding quotes if present
+	s = strings.Trim(s, "\"'")
+	return fmt.Sprintf("%q", s)
+}
+
+// overlayProfile merges a profile over the defaults (non-zero values from profile win)
+func overlayProfile(base, overlay projectConfigDefaults) projectConfigDefaults {
+	if overlay.Mode != "" {
+		base.Mode = overlay.Mode
+	}
+	if overlay.StructureOnly {
+		base.StructureOnly = true
+	}
+	if overlay.Output != "" {
+		base.Output = overlay.Output
+	}
+	if overlay.Workers > 0 {
+		base.Workers = overlay.Workers
+	}
+	if overlay.ExcludeExt != "" {
+		base.ExcludeExt = overlay.ExcludeExt
+	}
+	if overlay.IncludeExt != "" {
+		base.IncludeExt = overlay.IncludeExt
+	}
+	if overlay.Exclude != "" {
+		base.Exclude = overlay.Exclude
+	}
+	if overlay.Include != "" {
+		base.Include = overlay.Include
+	}
+	if overlay.MaxDepth > 0 {
+		base.MaxDepth = overlay.MaxDepth
+	}
+	if overlay.MaxFileSize != "" {
+		base.MaxFileSize = overlay.MaxFileSize
+	}
+	if overlay.Force {
+		base.Force = true
+	}
+	return base
+}
+
+// mergeConfigFile applies config file defaults to cfg, but only for fields not already explicitly set by CLI flags
+func mergeConfigFile(cfg config, fileCfg projectConfigFile) config {
+	d := fileCfg.Defaults
+	if d.Mode != "" && cfg.mode == modeFileSpec {
+		switch d.Mode {
+		case "auto", "all":
+			cfg.mode = modeAuto
+		}
+	}
+	if d.StructureOnly && !cfg.structureOnly {
+		cfg.structureOnly = true
+	}
+	if d.Output != "" && cfg.outputFile == "" {
+		cfg.outputFile = d.Output
+	}
+	if d.Workers > 0 && cfg.numWorkers == 0 {
+		cfg.numWorkers = d.Workers
+	}
+	if d.MaxDepth > 0 && cfg.maxDepth == 0 {
+		cfg.maxDepth = d.MaxDepth
+	}
+	if d.MaxFileSize != "" && cfg.maxFileSizeBytes == 0 {
+		cfg.maxFileSizeBytes = parseSize(d.MaxFileSize)
+	}
+	if d.Force && !cfg.force {
+		cfg.force = true
+	}
+	if d.ExcludeExt != "" && len(cfg.excludeExts) == 0 {
+		for _, e := range strings.Split(d.ExcludeExt, ",") {
+			e = strings.TrimSpace(e)
+			if e != "" {
+				cfg.excludeExts = append(cfg.excludeExts, e)
+			}
+		}
+	}
+	if d.IncludeExt != "" && len(cfg.includeExts) == 0 {
+		for _, e := range strings.Split(d.IncludeExt, ",") {
+			e = strings.TrimSpace(e)
+			if e != "" {
+				cfg.includeExts = append(cfg.includeExts, e)
+			}
+		}
+	}
+	if d.Exclude != "" && len(cfg.excludePatterns) == 0 {
+		for _, p := range strings.Split(d.Exclude, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cfg.excludePatterns = append(cfg.excludePatterns, p)
+			}
+		}
+	}
+	if d.Include != "" && len(cfg.includePaths) == 0 {
+		for _, p := range strings.Split(d.Include, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cfg.includePaths = append(cfg.includePaths, p)
 			}
 		}
 	}
@@ -1269,8 +1747,37 @@ func setupUsage() {
 		fmt.Fprintf(os.Stderr, "  # Skip preview: Generate immediately\n")
 		fmt.Fprintf(os.Stderr, "  %s --force src/ cmd/\n\n", invocationName)
 
+		fmt.Fprintf(os.Stderr, "  # Only include Go and Markdown files\n")
+		fmt.Fprintf(os.Stderr, "  %s --mode auto --include-ext go,md\n\n", invocationName)
+
+		fmt.Fprintf(os.Stderr, "  # Exclude log and temp files, skip files over 1MB\n")
+		fmt.Fprintf(os.Stderr, "  %s --mode auto --exclude-ext log,tmp --max-file-size 1MB\n\n", invocationName)
+
+		fmt.Fprintf(os.Stderr, "  # Only include git-changed files (vs main branch)\n")
+		fmt.Fprintf(os.Stderr, "  %s --changed\n\n", invocationName)
+
+		fmt.Fprintf(os.Stderr, "  # Only include files changed since a git tag\n")
+		fmt.Fprintf(os.Stderr, "  %s --since v1.0.0\n\n", invocationName)
+
+		fmt.Fprintf(os.Stderr, "  # Use a named profile from .promptpacker.yml\n")
+		fmt.Fprintf(os.Stderr, "  %s --profile llm\n\n", invocationName)
+
 		fmt.Fprintf(os.Stderr, "  # Combine options\n")
 		fmt.Fprintf(os.Stderr, "  %s --mode auto --structure-only --max-depth 3 --output structure.md\n\n", invocationName)
+
+		fmt.Fprintf(os.Stderr, "Config File (.promptpacker.yml):\n")
+		fmt.Fprintf(os.Stderr, "  Place a .promptpacker.yml in your project root to set defaults.\n")
+		fmt.Fprintf(os.Stderr, "  Example:\n")
+		fmt.Fprintf(os.Stderr, "    defaults:\n")
+		fmt.Fprintf(os.Stderr, "      mode: auto\n")
+		fmt.Fprintf(os.Stderr, "      exclude-ext: log,tmp,bak\n")
+		fmt.Fprintf(os.Stderr, "    profiles:\n")
+		fmt.Fprintf(os.Stderr, "      llm:\n")
+		fmt.Fprintf(os.Stderr, "        mode: auto\n")
+		fmt.Fprintf(os.Stderr, "        exclude-ext: log,tmp,min.js,min.css\n")
+		fmt.Fprintf(os.Stderr, "      structure:\n")
+		fmt.Fprintf(os.Stderr, "        structure-only: true\n")
+		fmt.Fprintf(os.Stderr, "        max-depth: 3\n\n")
 	}
 }
 
@@ -1325,7 +1832,7 @@ func showPreview(entries []walkEntry, cfg config) bool {
 	}
 
 	previewText.WriteString(fmt.Sprintf("\n%s\n", strings.Repeat("─", 60)))
-	previewText.WriteString(fmt.Sprintf("Summary:\n"))
+	previewText.WriteString("Summary:\n")
 	previewText.WriteString(fmt.Sprintf("  Directories: %d\n", dirCount))
 	previewText.WriteString(fmt.Sprintf("  Files: %d\n", fileCount))
 	previewText.WriteString(fmt.Sprintf("  Total size: %s\n", formatSize(totalSize)))
@@ -1804,7 +2311,7 @@ func sortEntries(entries []walkEntry) {
 	})
 }
 
-func writeStructure(writer *bufio.Writer, entries []walkEntry) {
+func writeStructure(writer *bufio.Writer, entries []walkEntry, cfg config) {
 	_, err := writer.WriteString("# Project Structure\n\n```\n")
 	if err != nil {
 		logWarn("Error writing structure header: %v", err)
@@ -1828,12 +2335,30 @@ func writeStructure(writer *bufio.Writer, entries []walkEntry) {
 			lineBuilder.WriteString("/")
 		}
 		lineBuilder.WriteString(baseName)
+
+		// Append optional annotations
+		var annotations []string
+		if cfg.showSizes && !entry.isDir {
+			info, statErr := os.Stat(entry.fullPath)
+			if statErr == nil {
+				annotations = append(annotations, formatSize(info.Size()))
+			}
+		}
+		if cfg.showExtensions && !entry.isDir {
+			ext := filepath.Ext(baseName)
+			if ext != "" {
+				annotations = append(annotations, strings.TrimPrefix(ext, "."))
+			}
+		}
+		if len(annotations) > 0 {
+			lineBuilder.WriteString(" (" + strings.Join(annotations, ", ") + ")")
+		}
+
 		lineBuilder.WriteRune('\n')
 
 		_, err = writer.WriteString(lineBuilder.String())
 		if err != nil {
 			logWarn("Error writing structure line for %s: %v", entry.relPath, err)
-
 		}
 	}
 
