@@ -18,6 +18,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -355,6 +356,7 @@ type config struct {
 	maxDepth        int // 0 means no limit
 	force           bool
 	slowMode        bool
+	copyToClipboard bool
 	includePaths    []string // For file-spec mode
 	// Phase 2: Extension filtering
 	includeExts []string // Only include files with these extensions (empty = all)
@@ -628,15 +630,25 @@ func (m appModel) View() string {
 		}
 	case stateWriting:
 		s.WriteString(m.scanSpinner.View() + " ")
-		s.WriteString(infoStyle.Render("Writing to output file...") + "\n\n")
+		if m.cfg.copyToClipboard {
+			s.WriteString(infoStyle.Render("Copying to clipboard...") + "\n\n")
+		} else {
+			s.WriteString(infoStyle.Render("Writing to output file...") + "\n\n")
+		}
 		if m.writeTotal > 0 {
 			percent := float64(m.writeCount) / float64(m.writeTotal)
 			s.WriteString(m.writeProgress.ViewAs(percent) + "\n")
-			s.WriteString(dimStyle.Render(fmt.Sprintf("%d/%d files written", m.writeCount, m.writeTotal)) + "\n")
+			if m.cfg.copyToClipboard {
+				s.WriteString(dimStyle.Render(fmt.Sprintf("%d/%d files processed", m.writeCount, m.writeTotal)) + "\n")
+			} else {
+				s.WriteString(dimStyle.Render(fmt.Sprintf("%d/%d files written", m.writeCount, m.writeTotal)) + "\n")
+			}
 		}
 	case stateDone:
 		s.WriteString(doneStyle.Render("✓") + " ")
-		if m.cfg.structureOnly {
+		if m.cfg.copyToClipboard {
+			s.WriteString(doneStyle.Render("Successfully copied to clipboard!") + "\n")
+		} else if m.cfg.structureOnly {
 			s.WriteString(doneStyle.Render(fmt.Sprintf("Successfully created structure-only output: %s", m.cfg.outputFile)) + "\n")
 		} else {
 			s.WriteString(doneStyle.Render(fmt.Sprintf("Successfully created %s", m.cfg.outputFile)) + "\n")
@@ -1057,12 +1069,24 @@ func startProcessing(cfg config, entries []walkEntry, progressChan chan<- tea.Ms
 
 func startWriting(cfg config, entries []walkEntry, processedContent map[string]fileResult, progressChan chan<- tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		outFile, err := os.Create(cfg.outputFile)
-		if err != nil {
-			return writeCompleteMsg{err: err}
+		var writer *bufio.Writer
+		var outWriter io.Writer
+		var buf bytes.Buffer
+		var outFile *os.File
+		var err error
+
+		if cfg.copyToClipboard {
+			outWriter = &buf
+		} else {
+			outFile, err = os.Create(cfg.outputFile)
+			if err != nil {
+				return writeCompleteMsg{err: err}
+			}
+			defer outFile.Close()
+			outWriter = outFile
 		}
-		defer outFile.Close()
-		writer := bufio.NewWriter(outFile)
+
+		writer = bufio.NewWriter(outWriter)
 
 		writeStructure(writer, entries, cfg)
 
@@ -1097,6 +1121,13 @@ func startWriting(cfg config, entries []walkEntry, processedContent map[string]f
 		err = writer.Flush()
 		if err != nil {
 			return writeCompleteMsg{err: err}
+		}
+
+		if cfg.copyToClipboard {
+			err = clipboard.WriteAll(buf.String())
+			if err != nil {
+				return writeCompleteMsg{err: err}
+			}
 		}
 
 		return writeCompleteMsg{}
@@ -1208,6 +1239,8 @@ func parseFlags() config {
 	gitSincePtr := flag.String("since", "", "Only include files changed since this git ref (e.g. v1.0.0, HEAD~5).")
 	gitBranchPtr := flag.String("branch", "", "Only include files changed relative to this branch.")
 	profilePtr := flag.String("profile", "", "Named profile from .promptpacker.yml config file.")
+	copyPtr := flag.Bool("copy", false, "Copy output directly to clipboard instead of writing to file.")
+	cPtr := flag.Bool("c", false, "Copy output directly to clipboard instead of writing to file (shorthand).")
 
 	flag.Parse()
 
@@ -1222,6 +1255,7 @@ func parseFlags() config {
 	cfg.maxDepth = *maxDepthPtr
 	cfg.force = *forcePtr
 	cfg.slowMode = *slowPtr
+	cfg.copyToClipboard = *copyPtr || *cPtr
 	includeList = *includeListPtr
 	cfg.gitChanged = *gitChangedPtr
 	cfg.gitSince = *gitSincePtr
@@ -1405,6 +1439,7 @@ type projectConfigDefaults struct {
 	MaxDepth      int      `json:"max-depth"`
 	MaxFileSize   string   `json:"max-file-size"`
 	Force         bool     `json:"force"`
+	Copy          bool     `json:"copy"`
 	_             struct{} // prevent unkeyed init
 }
 
@@ -1604,6 +1639,9 @@ func overlayProfile(base, overlay projectConfigDefaults) projectConfigDefaults {
 	if overlay.Force {
 		base.Force = true
 	}
+	if overlay.Copy {
+		base.Copy = true
+	}
 	return base
 }
 
@@ -1633,6 +1671,9 @@ func mergeConfigFile(cfg config, fileCfg projectConfigFile) config {
 	}
 	if d.Force && !cfg.force {
 		cfg.force = true
+	}
+	if d.Copy && !cfg.copyToClipboard {
+		cfg.copyToClipboard = true
 	}
 	if d.ExcludeExt != "" && len(cfg.excludeExts) == 0 {
 		for _, e := range strings.Split(d.ExcludeExt, ",") {
@@ -1746,6 +1787,9 @@ func setupUsage() {
 
 		fmt.Fprintf(os.Stderr, "  # Skip preview: Generate immediately\n")
 		fmt.Fprintf(os.Stderr, "  %s --force src/ cmd/\n\n", invocationName)
+
+		fmt.Fprintf(os.Stderr, "  # Copy output to clipboard instead of saving to file\n")
+		fmt.Fprintf(os.Stderr, "  %s --copy src/\n\n", invocationName)
 
 		fmt.Fprintf(os.Stderr, "  # Only include Go and Markdown files\n")
 		fmt.Fprintf(os.Stderr, "  %s --mode auto --include-ext go,md\n\n", invocationName)
