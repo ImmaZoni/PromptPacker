@@ -1587,11 +1587,7 @@ func yamlToJSON(yaml string) string {
 	lines := strings.Split(yaml, "\n")
 	var buf strings.Builder
 	buf.WriteString("{")
-	type stackEntry struct{ key string }
-	indent := 0
 	first := [3]bool{true, true, true}
-	_ = indent
-	_ = stackEntry{}
 	// Simple line-by-line parsing
 	topSection := ""
 	subSection := ""
