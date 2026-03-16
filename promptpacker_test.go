@@ -244,3 +244,112 @@ func TestShouldIgnoreHierarchical(t *testing.T) {
 		t.Errorf("Expected important.log to NOT be ignored (ignored=%v, decided=%v)", ignored, decided)
 	}
 }
+
+func TestMatch(t *testing.T) {
+	tests := []struct {
+		name         string
+		patternParts []string
+		pathParts    []string
+		expected     bool
+	}{
+		{
+			name:         "Exact match",
+			patternParts: []string{"a", "b"},
+			pathParts:    []string{"a", "b"},
+			expected:     true,
+		},
+		{
+			name:         "Basic mismatch",
+			patternParts: []string{"a", "b"},
+			pathParts:    []string{"a", "c"},
+			expected:     false,
+		},
+		{
+			name:         "Single wildcard match",
+			patternParts: []string{"*.go"},
+			pathParts:    []string{"main.go"},
+			expected:     true,
+		},
+		{
+			name:         "Single wildcard in middle",
+			patternParts: []string{"a", "*", "c"},
+			pathParts:    []string{"a", "b", "c"},
+			expected:     true,
+		},
+		{
+			name:         "Single wildcard mismatch",
+			patternParts: []string{"a", "*"},
+			pathParts:    []string{"a", "b", "c"},
+			expected:     false,
+		},
+		{
+			name:         "Double wildcard at start",
+			patternParts: []string{"**", "c"},
+			pathParts:    []string{"a", "b", "c"},
+			expected:     true,
+		},
+		{
+			name:         "Double wildcard in middle",
+			patternParts: []string{"a", "**", "d"},
+			pathParts:    []string{"a", "b", "c", "d"},
+			expected:     true,
+		},
+		{
+			name:         "Double wildcard at end",
+			patternParts: []string{"a", "**"},
+			pathParts:    []string{"a", "b", "c"},
+			expected:     true,
+		},
+		{
+			name:         "Double wildcard zero segments match",
+			patternParts: []string{"a", "**", "b"},
+			pathParts:    []string{"a", "b"},
+			expected:     true,
+		},
+		{
+			name:         "Double wildcard empty path match",
+			patternParts: []string{"**"},
+			pathParts:    []string{},
+			expected:     true,
+		},
+		{
+			name:         "Double wildcard complex match",
+			patternParts: []string{"**", "src", "**", "*.go"},
+			pathParts:    []string{"project", "src", "utils", "math.go"},
+			expected:     true,
+		},
+		{
+			name:         "Empty pattern and path",
+			patternParts: []string{},
+			pathParts:    []string{},
+			expected:     true,
+		},
+		{
+			name:         "Empty pattern, non-empty path",
+			patternParts: []string{},
+			pathParts:    []string{"a"},
+			expected:     false,
+		},
+		{
+			name:         "Non-empty pattern, empty path",
+			patternParts: []string{"a"},
+			pathParts:    []string{},
+			expected:     false,
+		},
+		{
+			name:         "Pattern ** with empty path",
+			patternParts: []string{"**"},
+			pathParts:    []string{},
+			expected:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := match(tt.patternParts, tt.pathParts)
+			if result != tt.expected {
+				t.Errorf("match(%v, %v) = %v; want %v", tt.patternParts, tt.pathParts, result, tt.expected)
+			}
+		})
+	}
+}
