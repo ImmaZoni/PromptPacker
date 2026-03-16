@@ -339,6 +339,7 @@ type walkEntry struct {
 	relPath  string
 	fullPath string
 	isDir    bool
+	size     int64
 	depth    int
 }
 type modeType string
@@ -596,10 +597,8 @@ func (m appModel) View() string {
 				dirCount++
 			} else {
 				fileCount++
-				if info, err := os.Stat(entry.fullPath); err == nil {
-					totalSize += info.Size()
-					estimatedTokens += info.Size() / 4
-				}
+				totalSize += entry.size
+				estimatedTokens += entry.size / 4
 			}
 		}
 
@@ -613,11 +612,7 @@ func (m appModel) View() string {
 			if entry.isDir {
 				s.WriteString(fmt.Sprintf("  [DIR]  %s\n", entry.relPath))
 			} else {
-				info, err := os.Stat(entry.fullPath)
-				sizeStr := ""
-				if err == nil {
-					sizeStr = fmt.Sprintf(" (%s)", formatSize(info.Size()))
-				}
+				sizeStr := fmt.Sprintf(" (%s)", formatSize(entry.size))
 				s.WriteString(fmt.Sprintf("  [FILE] %s%s\n", entry.relPath, sizeStr))
 			}
 		}
@@ -997,7 +992,14 @@ func startScanning(cfg config, progressChan chan<- tea.Msg) tea.Cmd {
 					time.Sleep(1000 * time.Millisecond)
 				}
 
-				entries = append(entries, walkEntry{relPath: relPath, fullPath: absPath, isDir: isDir, depth: depth})
+				var size int64
+				if !isDir {
+					if info, err := d.Info(); err == nil {
+						size = info.Size()
+					}
+				}
+
+				entries = append(entries, walkEntry{relPath: relPath, fullPath: absPath, isDir: isDir, size: size, depth: depth})
 				return nil
 			})
 
@@ -1931,11 +1933,8 @@ func showPreview(entries []walkEntry, cfg config) bool {
 			dirCount++
 		} else {
 			fileCount++
-			info, err := os.Stat(entry.fullPath)
-			if err == nil {
-				totalSize += info.Size()
-				estimatedTokens += info.Size() / 4
-			}
+			totalSize += entry.size
+			estimatedTokens += entry.size / 4
 		}
 	}
 
@@ -1957,11 +1956,7 @@ func showPreview(entries []walkEntry, cfg config) bool {
 		if entry.isDir {
 			previewText.WriteString(fmt.Sprintf("  [DIR]  %s\n", entry.relPath))
 		} else {
-			info, err := os.Stat(entry.fullPath)
-			sizeStr := ""
-			if err == nil {
-				sizeStr = fmt.Sprintf(" (%s)", formatSize(info.Size()))
-			}
+			sizeStr := fmt.Sprintf(" (%s)", formatSize(entry.size))
 			previewText.WriteString(fmt.Sprintf("  [FILE] %s%s\n", entry.relPath, sizeStr))
 		}
 	}
@@ -2554,10 +2549,7 @@ func writeStructure(writer *bufio.Writer, entries []walkEntry, cfg config) {
 		// Append optional annotations
 		var annotations []string
 		if cfg.showSizes && !entry.isDir {
-			info, statErr := os.Stat(entry.fullPath)
-			if statErr == nil {
-				annotations = append(annotations, formatSize(info.Size()))
-			}
+			annotations = append(annotations, formatSize(entry.size))
 		}
 		if cfg.showExtensions && !entry.isDir {
 			ext := filepath.Ext(baseName)
