@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func TestFormatSize(t *testing.T) {
+	tests := []struct {
+		input    int64
+		expected string
+	}{
+		{0, "0 B"},
+		{500, "500 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1024 * 1024, "1.0 MB"},
+		{1536 * 1024, "1.5 MB"},
+		{1024 * 1024 * 1024, "1.0 GB"},
+		{1024 * 1024 * 1024 * 1024, "1.0 TB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := formatSize(tt.input)
+			if result != tt.expected {
+				t.Errorf("formatSize(%d) = %q; want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestParseSize(t *testing.T) {
 	tests := []struct {
 		input    string
