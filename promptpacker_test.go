@@ -244,3 +244,89 @@ func TestShouldIgnoreHierarchical(t *testing.T) {
 		t.Errorf("Expected important.log to NOT be ignored (ignored=%v, decided=%v)", ignored, decided)
 	}
 }
+
+func TestGetLanguageHint(t *testing.T) {
+	tests := []struct {
+		filename string
+		expected string
+	}{
+		// Common extensions
+		{"main.go", "go"},
+		{"app.js", "javascript"},
+		{"script.ts", "typescript"},
+		{"script.py", "python"},
+		{"App.java", "java"},
+		{"script.cs", "csharp"},
+		{"index.php", "php"},
+		{"script.rb", "ruby"},
+		{"main.rs", "rust"},
+		{"main.swift", "swift"},
+		{"main.kt", "kotlin"},
+		{"main.kts", "kotlin"},
+		{"Main.scala", "scala"},
+		{"index.html", "html"},
+		{"index.htm", "html"},
+		{"style.css", "css"},
+		{"style.scss", "scss"},
+		{"style.sass", "scss"},
+		{"style.less", "less"},
+		{"data.json", "json"},
+		{"config.yaml", "yaml"},
+		{"config.yml", "yaml"},
+		{"data.xml", "xml"},
+		{"query.sql", "sql"},
+		{"script.sh", "bash"},
+		{"script.bash", "bash"},
+		{"script.zsh", "bash"},
+		{"script.ps1", "powershell"},
+		{"README.md", "markdown"},
+		{"README.markdown", "markdown"},
+
+		// Extensions mapping to nothing or special ones
+		{"README.txt", ""},
+		{"file", ""}, // no extension
+		{"Dockerfile", ""}, // .Ext() is empty for "Dockerfile" without a dot
+		{"script.docker", "dockerfile"},
+		{"script.dockerfile", "dockerfile"},
+		{".env", "bash"}, // .Ext() is ".env"
+		{".gitignore", "gitignore"}, // .Ext() is ".gitignore"
+		{"go.mod", "go.mod"},
+		{"go.sum", "go.sum"},
+		{"config.toml", "toml"},
+		{"script.lua", "lua"},
+		{"script.perl", "perl"},
+		{"script.pl", "perl"},
+		{"script.r", "r"},
+		{"script.dart", "dart"},
+		{"App.jsx", "jsx"},
+		{"App.tsx", "tsx"},
+		{"App.vue", "vue"},
+		{"App.svelte", "svelte"},
+
+		// Case insensitivity
+		{"main.GO", "go"},
+		{"README.MD", "markdown"},
+		{"app.JS", "javascript"},
+
+		// Unmapped extensions fallback
+		{"file.unknown", "unknown"},
+		{"file.customext", "customext"},
+
+		// Long extensions
+		{"file.thisextensioniswaytoolong", ""}, // Length > 20
+		{"file.exactlytwenty123456", "exactlytwenty123456"}, // Length == 20
+		{"file.twentyonechars1234567", ""}, // Length == 21
+
+		// Multiple dots
+		{"archive.tar.gz", "gz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			result := getLanguageHint(tt.filename)
+			if result != tt.expected {
+				t.Errorf("getLanguageHint(%q) = %q; want %q", tt.filename, result, tt.expected)
+			}
+		})
+	}
+}
