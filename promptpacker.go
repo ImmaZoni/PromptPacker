@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -1207,7 +1208,9 @@ func processFileContent(entry walkEntry, cfg config) (string, error) {
 	var buf bytes.Buffer
 
 	if cfg.format == "xml" {
-		header := fmt.Sprintf("<file name=\"%s\">\n", entry.relPath)
+		var escapedName bytes.Buffer
+		xml.EscapeText(&escapedName, []byte(entry.relPath))
+		header := fmt.Sprintf("<file name=\"%s\">\n", escapedName.String())
 		buf.WriteString(header)
 	} else {
 		header := fmt.Sprintf("## %s\n\n", entry.relPath)
@@ -1239,7 +1242,11 @@ func processFileContent(entry walkEntry, cfg config) (string, error) {
 					contentStr = re.ReplaceAllString(contentStr, "[REDACTED_BY_PROMPTPACKER]")
 				}
 			}
-			buf.WriteString(contentStr)
+			if cfg.format == "xml" {
+				xml.EscapeText(&buf, []byte(contentStr))
+			} else {
+				buf.WriteString(contentStr)
+			}
 		}
 	}
 
