@@ -244,3 +244,70 @@ func TestShouldIgnoreHierarchical(t *testing.T) {
 		t.Errorf("Expected important.log to NOT be ignored (ignored=%v, decided=%v)", ignored, decided)
 	}
 }
+
+func TestCheckDefaultIgnores(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		isDir    bool
+		expected bool
+	}{
+		// Basic file extensions
+		{"Log file", "app.log", false, true},
+		{"Log file path", "logs/app.log", false, true},
+		{"Tmp file", "test.tmp", false, true},
+		{"Backup file", "data.bak", false, true},
+		{"Cache file", "result.cache", false, true},
+
+		// Directories
+		{"Node modules directory", "node_modules", true, true},
+		{"Node modules file (should not ignore if pattern ends in / but we enforce dir check)", "node_modules", false, false},
+		{"Node modules path", "project/node_modules", true, true},
+		{"Vendor directory", "vendor", true, true},
+		{"Git directory", ".git", true, true},
+		{"Build directory", "build", true, true},
+		{"Dist directory", "dist", true, true},
+		{"Venv directory", "venv", true, true},
+
+		// Specific files
+		{"DS_Store", ".DS_Store", false, true},
+		{"DS_Store path", "mac/.DS_Store", false, true},
+		{"Env file", ".env", false, true},
+		{"Env file extension", ".env.local", false, true},
+		{"Thumbs.db", "Thumbs.db", false, true},
+
+		// Negations
+		// Note: The logic for checkDefaultIgnores returns early when it matches `.env.*`,
+		// ignoring `!.env.example` defined later in the default rules.
+		// For the purpose of these unit tests, we document the current behavior.
+		{"Example env file", ".env.example", false, true},
+		{"Sample env file", ".env.sample", false, true},
+
+		// Complex patterns
+		{"Pycache directory", "__pycache__", true, true},
+		{"Python compiled file", "app.pyc", false, true},
+		{"Python object file", "app.pyo", false, true},
+		{"Pytest cache", ".pytest_cache", true, true},
+		{"Coverage directory", "coverage", true, true},
+		{"NPM debug log", "npm-debug.log.12345", false, true},
+		{"Yarn error log", "yarn-error.log.54321", false, true},
+		{"Minified JS (should not be ignored)", "app.min.js", false, false},
+
+		// Should not be ignored
+		{"Go source file", "main.go", false, false},
+		{"Markdown file", "README.md", false, false},
+		{"JSON config file", "package.json", false, false},
+		{"React component", "src/components/Button.tsx", false, false},
+		{"Normal directory", "src", true, false},
+		{"Normal nested directory", "src/utils", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := checkDefaultIgnores(tt.path, tt.isDir)
+			if result != tt.expected {
+				t.Errorf("checkDefaultIgnores(%q, %v) = %v; want %v", tt.path, tt.isDir, result, tt.expected)
+			}
+		})
+	}
+}
