@@ -2284,7 +2284,10 @@ func (m fileSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // dirHasSelectedDescendants returns true if any selected path is inside the given directory
 func (m fileSelectorModel) dirHasSelectedDescendants(dirPath string) bool {
 	// Normalize to forward slashes for consistent prefix matching
-	dirSlash := filepath.ToSlash(dirPath) + "/"
+	dirSlash := filepath.ToSlash(dirPath)
+	if !strings.HasSuffix(dirSlash, "/") {
+		dirSlash += "/"
+	}
 	for selPath := range m.selected {
 		if strings.HasPrefix(filepath.ToSlash(selPath), dirSlash) {
 			return true
@@ -2297,7 +2300,10 @@ func (m fileSelectorModel) dirHasSelectedDescendants(dirPath string) bool {
 func (m fileSelectorModel) isSelectedByParent(itemPath string) bool {
 	itemSlash := filepath.ToSlash(itemPath)
 	for selPath := range m.selected {
-		selSlash := filepath.ToSlash(selPath) + "/"
+		selSlash := filepath.ToSlash(selPath)
+		if !strings.HasSuffix(selSlash, "/") {
+			selSlash += "/"
+		}
 		if strings.HasPrefix(itemSlash, selSlash) {
 			return true
 		}
